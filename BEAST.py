@@ -229,7 +229,7 @@ class BEAST(Client):
         guess   = self.create_guess()
         cyphered = ''.join(chr(ord(c)^ord(k)) for c,k in izip(message, cycle(key)))
         cyphered2 = ''.join(chr(ord(c)^ord(k)) for c,k in izip(cyphered, cycle(guess)))
-
+        print cyphered2
         return cyphered2
 
     def create_guess(self, char=71):
@@ -238,14 +238,6 @@ class BEAST(Client):
 
     def nb_byte_add(self):
         return (self.length_block - len("the secret is ")) + (self.length_block - self.block_decipher - 1)
-
-    def choosing_block(self, current_block):
-        #in function of the path added in the request ~ we know the structure of the request
-        return self.frame[current_block * self.length_block:(current_block + 1) * self.length_block]
-
-    def find_plaintext_byte(self, frame, byte):
-        #return the byte found
-        return
 
     def size_of_block(self):
         print "Begins searching the size of a block...\n"
@@ -271,9 +263,12 @@ class BEAST(Client):
             return str(self.frame)
         elif self.start_alter is True:
             self.frame = bytearray(self.frame)
+            print binascii.hexlify(self.frame)
             block = self.construct_first_block()
+            print block
             for i in range(0,16):
                 self.frame[i] = block[i]
+            print binascii.hexlify(self.frame)
             return str(self.frame)
         return self.frame
 
