@@ -1,68 +1,110 @@
-#BEAST attack
+# BEAST-PoC (chosen-plaintext attack)
 
-A sample application of the **BEAST** attack with a MiTM to demonstrate the vunlerability of the protocol SSLv3, TLSv1
+This proof of concept is focused on the cryptography behind the BEAST (Browser Exploit Against SSL/TLS) attack presented by Thai Duong and Juliano Rizzo on September 23, 2011. This a [chosen-plaintext attack](https://en.wikipedia.org/wiki/Chosen-plaintext_attack) and this allow you to retrieve sensitives informations if the Transport Layer Security used is TLS1.0 or SSLv3.
+The orginal proof of concept can be found here : [Here come the Ninjas](http://netifera.com/research/beast/beast_DRAFT_0621.pdf)
 
-## How this exploit work ?
+**Note**: This is also an implementation of the vulnerability originally discovered by [Phillip Rogaway](https://en.wikipedia.org/wiki/Phillip_Rogaway). Discovered in 2002, there was no exploit released until BEAST in 2011. OpenSSL already knew the [problem](https://www.openssl.org/~bodo/tls-cbc.txt) and this why they updated TLS1.0 to TLS1.1 in April 2006.
 
-- **Server** :
-It's a perfect secure server ready to make handshake with a client using the protocol SSLv3 and receive encrypted requests from the client through is handler. <br />
-Class: `Server()` -  Important functions : `connection()`, `SecureTCPHandler.handle()`, `disconnect()`
+> 2 The CBC IV for each record except the first is the previous records' last
+   ciphertext block.  Thus the encryption is not secure against adversaries who
+   can adaptively choose plaintexts;
 
-- **Client** :
-A sample client, can be related to a web browser. The client makes requests to a server with a cookie inside. <br />
-Class: `Client(AESCipher)` -  Important functions : `connection()`, `request(...)`, `disconnect()` <br />
-Example request :
+### Be the BEAST
+
+#### SSLv3/TLS1.0 and CBC cipher mode
+
+SSLv3/TLS1.0 are protocols to encrypt/decrypt and secure your data. In our case, they both use the [CBC cipher mode chainning](https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Cipher_Block_Chaining_.28CBC.29) . The plaintext is divided into block regarding the encryption alogithm (AES,DES, 3DES) and the length is a mulitple of 8 or 16. If the plaintext don't fill the length, a [padding](https://en.wikipedia.org/wiki/Padding_(cryptography)#PKCS7) is added at the end to complete the missing space. I strongly advice you to open this images of [encryption](https://upload.wikimedia.org/wikipedia/commons/thumb/8/80/CBC_encryption.svg/601px-CBC_encryption.svg.png) and [decryption](https://upload.wikimedia.org/wikipedia/commons/thumb/2/2a/CBC_decryption.svg/601px-CBC_decryption.svg.png) to read this readme.
+
+
+Encryption | Decryption
+--- | --- 
+C<sub>i</sub> = E<sub>k</sub>(P<sub>i</sub> ⊕ C<sub>i-1</sub>), and C<sub>0</sub> = IV | P<sub>i</sub> = D<sub>k</sub>(C<sub>i</sub>) ⊕ C<sub>i-1</sub>, and C<sub>0</sub> = IV
+ 
+Basically this is just some simple XOR, you can also watch this video (not me) https://www.youtube.com/watch?v=0D7OwYp6ZEc. 
+
+I will introduce the [IV](https://en.wikipedia.org/wiki/Initialization_vector) in the next point. Remember that all this property will help us to drive our attack.
+
+#### Cryptology
+
+When we use the CBC we need a vector initialisation call IV. This IV is random (or fixed) but in any case it should not be predictable from anyone. In TLS1.0 and SSLv3 the first IV of the request is random, fine. But to gain some time and not generate a new random IV every time, the implemenation of TLS1.0 and SSLv3 used the last block of the previous cipher text has an IV. In other words, the IV is now guessable.
+We will assume the length of each block will be 8 (DES) and the attacker have a MiTM to retrieve all the cipher.
+
+Example :
+
+C<sub>0</sub> | C<sub>...</sub> | C<sub>i-1</sub> | C<sub>i</sub> | C<sub>i+1</sub> |C<sub>n</sub>
+
+Now the interesting part, this is the different cryptographic steps of the attack to retrieve one byte : 
+
+* first we send a request call C² to get the last block of the cipher meaning the next IV of the second request
+* this is a chosen plaintext attack, so the attacker can send this message `bbbbbbbTHIS_IS_A_SECRET_COOKIE` through the victim.
+
+You can notice the seven `b` before the secret cookie. If the length of a block is 8 we need to push 7 know bytes. This information is very important, the attacker know the 7 first bytes of the first block. 
+
+But why ? This allow us to have only 256 possibilty to find one byte and not 256^8 to find 8 bytes !  
+
+Now the victim send the request and it will be encrypted like this :
+
+C<sub>0</sub> | C<sub>1</sub> | C<sub>2</sub> | C<sub>3</sub> | C<sub>4</sub>
+
+Where C<sub>0</sub> = E<sub>k</sub>(IV ⊕ bbbbbbbT) = E<sub>k</sub>(C²<sub>n</sub> ⊕ bbbbbbbT)
+
+* the attacker want to retrieve the information in the block C<sub>0</sub> C<sub>1</sub>, C<sub>2</sub> ... **he always need the previous block**
+* a third request is send after build a special block P'<sub>0</sub>. The first block will be encrypted like this : C'<sub>0</sub> = E<sub>k</sub>(P'<sub>0</sub> ⊕ IV')
+Since this is a chosen plaintext attack, the attacker can construct a block P'<sub>0</sub> like this :
+
+P'<sub>0</sub> = C²<sub>n</sub> ⊕ C<sub>4</sub> ⊕ bbbbbbbX
+
+The only unknow element is `X`, there is 256 possibilities so he will try max 256 char.
+The request is send and encrypt like this :
+
+C'<sub>0</sub> = E<sub>k</sub>(P'<sub>0</sub> ⊕ IV') <br>
+C'<sub>0</sub> = E<sub>k</sub>(C²<sub>n</sub> ⊕ C<sub>4</sub> ⊕ bbbbbbbX ⊕ IV') or C<sub>4</sub> ⊕ IV' = 0 <br>
+C'<sub>0</sub> = E<sub>k</sub>(C²<sub>n</sub> ⊕ bbbbbbbX) <br>
+C'<sub>0</sub> = E<sub>k</sub>(IV ⊕ bbbbbbbX) <br>
+
+Now he compares : C'<sub>0</sub> and C<sub>0</sub>, if they are equal, then he just found the byte `X` in position 8. If it doesn't match, he retries with another char and compare again etc.
+
+Now we have one byte we can get another one by shift the previous request by one on the left : `bbbbbbTHIS_IS_A_SECRET_COOKIE`. He now have six `b` and we also now the `T`, so we have one char unknow. We build a new P'<sub>0</sub> = C<sub>0</sub> ⊕ C<sub>4</sub> ⊕ bbbbbbTX etc...
+
+**Note**: another way with only two request is to set the first block of the plaintext and use this information for the three XOR. We don't need anymore the C² last block. C<sub>1</sub> = E<sub>k</sub>(C<sub>0</sub> ⊕ bbbbbbbT) and then P'<sub>0</sub> = C<sub>0</sub> ⊕ C<sub>4</sub> ⊕ bbbbbbbX. He also need to compare C'<sub>0</sub> and C<sub>1</sub>.
+This is another way to do it, you can notice in the PoC i code the two possibilities :)
+
+We can now retrieve all the char ! You can launch the PoC now. I explain also a point **[Attack](#attack)**, i advise you to read it :)
+
+### Launch
+
 ```
-GET / HTTP/1.1\r\nCookie: UpVP0rDn5SoHoiX9\r\n\r\n
+	python BEAST-poc.py
 ```
 
-- **Proxy** :
-The proxy is our man in the middle, he is completely passive. He intercepts encrypted requests from the client to the server and lets the attacker alter them. He also intercepts the data from the server to the client and gets the header response status. <br />
-Class: `Proxy()` -  Important functions : `ProxyTCPHandler.handle()`
+#### Attack
 
-- **Attacker** : He can ask to the client generate a request to a secure server with a cookie inside. In real case, it can be done by injecting some javascript into the a web page visited by the client.
-He also alters client's requests regarding the proxy interception. Finally he can decipher one byte of the client's request. <br />
-Class: `Beast(Client)` -  Important functions : `run()`, `alter(...)`
+An attacker cannot use HTTP protocol because the first block will be field with `GET / HTTP/1.1\r\n`.
 
-**Note** I don't find a way to use ssl context from Python. I use a() traditionnal encryption)[http://stackoverflow.com/a/12525165/2274530] in AES (utils/AESCipher) wit no mac and padding. Follow this [issues](https://github.com/mpgn/BEAST-exploit/issues/1)
+> ... cannot control the first few bytes of each request because they are always
+set as a fixed string such as GET /, POST /, etc. Instead he can use [socket](https://en.wikipedia.org/wiki/Network_socket).
 
-###Exploit
+He also need to inject some javascript into a malicious page. The victim need to be connected to this page and stay during unitl the attack is done.
+This is a chosen-plaintext attack so the attacker can send through the javascript code every plaintext he wants and intercept the result with a Man in The Middle. This diagram of the attack :
 
-The attack starts with the function `exploit.run()`.
-By hypothesis the requests are encrypted  with [CBC](http://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Cipher_Block_Chaining_.28CBC.29). We know that the length of the bloc are 16 bytes because it's AES.
+This attack need a important conditions to be successfull (TLS1.0 or inferior, CBC cipher mode, MiTM, malicious javascript). But Thai Duong and Juliano Rizzo proove it can be possible and the demontrate there exploit by stealing cookie on [Paypal](https://www.youtube.com/watch?v=BTqAIDVUvrU) webiste.
 
-The attacker know the construction of the packet except the secret text.
+Everythings is now fix and this attack has little probability of being realized.
 
-For example : `|the secret is TH|IS_IS_SECRET...|`
+## Contributor
 
-The attacker know the length of `the secret is ` is 14 bytes. He adds a byte to make the request 15 bytes length. (This is padding in the code).
-After that he will have something like that:
+[mpgn](https://github.com/mpgn) 
 
-`athe secret is T|HIS_IS_SECRET...|`
+### Licences
 
-Now, he doesn't know only one char : T. (he will try the  256 possibilities to find the result.)
+[licence MIT](https://github.com/mpgn/BEAST-PoC/blob/master/LICENSE)
 
-After that, a request from the client is send to a server, the proxy intercept this request and the attacker reads and remembers.
-He takes the last cipher block of the request and the Ci-1 cipher block he want to decrypt.
-He makes a xor operation of (athe secret is T) XOR iv XOR ci-1 and send this to the serveur.
-When he will intercept the request, he checks if the cipher are the same in the first request and in the second request. If no, he will retry with an another char. Otherwise we will change the plaintext guess :
+### References
 
-`the secret is GH|IS_IS_SECRET...|`
-
-And he repeats the previous operation until he decrypts all bytes of the secret text.
-
-##Run it !
-
-Require python version `2.7.*` to launch this exploit. Then just run:
-```
-python BEAST.py localhost 1111
-```
-
-The Poodle attack cannot be run on an updated Debian machines. 
-
-
-##Ressources
-- http://en.wikipedia.org/wiki/Transport_Layer_Security#BEAST_attack
-- https://github.com/EiNSTeiN-/chosen-plaintext
-- http://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Cipher_Block_Chaining_.28CBC.29
-- http://www.hit.bme.hu/~buttyan/courses/EIT-SEC/abib/04-TLS/BEAST.pdf
+* http://netifera.com/research/beast/beast_DRAFT_0621.pdf
+* http://www.bortzmeyer.org/beast-tls.html
+* http://fr.slideshare.net/danrlde/20120418-luedtke-ssltlscbcbeast
+* http://crypto.stackexchange.com/questions/5094/is-aes-in-cbc-mode-secure-if-a-known-and-or-fixed-iv-is-used
+* http://security.stackexchange.com/questions/18505/is-beast-really-fixed-in-all-modern-browsers
+* https://defuse.ca/cbcmodeiv.htm
+* http://stackoverflow.com/questions/22644392/chrome-websockets-cors-policy
