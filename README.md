@@ -77,6 +77,8 @@ We can now retrieve all the char ! You can launch the PoC now. I explain also a 
 	python BEAST-poc.py
 ```
 
+[![asciicast](https://asciinema.org/a/40094.png)](https://asciinema.org/a/40094)
+
 #### Attack
 
 An attacker cannot use HTTP protocol because the first block will be field with `GET / HTTP/1.1\r\n`.
@@ -86,6 +88,8 @@ set as a fixed string such as GET /, POST /, etc. Instead he can use [socket](ht
 
 He also need to inject some javascript into a malicious page. The victim need to be connected to this page and stay during unitl the attack is done.
 This is a chosen-plaintext attack so the attacker can send through the javascript code every plaintext he wants and intercept the result with a Man in The Middle. This diagram of the attack :
+
+![beast-poc](http://mpgn.fr/ressources/img/beast.png)
 
 This attack need a important conditions to be successfull (TLS1.0 or inferior, CBC cipher mode, MiTM, malicious javascript). But Thai Duong and Juliano Rizzo proove it can be possible and the demontrate there exploit by stealing cookie on [Paypal](https://www.youtube.com/watch?v=BTqAIDVUvrU) webiste.
 
