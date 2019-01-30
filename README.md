@@ -11,7 +11,7 @@ The orginal proof of concept can be found here : [Here come the Ninjas](http://n
 
 ### Be the BEAST
 
-#### SSLv3/TLS1.0 and CBC cipher mode
+#### 1. SSLv3/TLS1.0 and CBC cipher mode
 
 SSLv3/TLS1.0 are protocols to encrypt/decrypt and secure your data. In our case, they both use the [CBC cipher mode chainning](https://en.wikipedia.org/wiki/Block_cipher_mode_of_operation#Cipher_Block_Chaining_.28CBC.29) . The plaintext is divided into block regarding the encryption alogithm (AES,DES, 3DES) and the length is a mulitple of 8 or 16. If the plaintext don't fill the length, a [padding](https://en.wikipedia.org/wiki/Padding_(cryptography)#PKCS7) is added at the end to complete the missing space. I strongly advice you to open this images of [encryption](https://upload.wikimedia.org/wikipedia/commons/thumb/8/80/CBC_encryption.svg/601px-CBC_encryption.svg.png) and [decryption](https://upload.wikimedia.org/wikipedia/commons/thumb/2/2a/CBC_decryption.svg/601px-CBC_decryption.svg.png) to read this readme.
 
@@ -24,7 +24,7 @@ Basically this is just some simple XOR, you can also watch this video (not me) h
 
 I will introduce the [IV](https://en.wikipedia.org/wiki/Initialization_vector) in the next point. Remember that all this property will help us to drive our attack.
 
-#### Cryptology
+#### 2. Cryptology
 
 When we use the CBC we need a vector initialisation call IV. This IV is random (or fixed) but in any case it should not be predictable from anyone. In TLS1.0 and SSLv3 the first IV of the request is random, fine. But to gain some time and not generate a new random IV every time, the implemenation of TLS1.0 and SSLv3 used the last block of the previous cipher text has an IV. In other words, the IV is now guessable.
 We will assume the length of each block will be 8 (DES) and the attacker have a MiTM to retrieve all the cipher.
@@ -69,12 +69,12 @@ Now we have one byte we can get another one by shift the previous request by one
 **Note**: another way with only two request is to set the first block of the plaintext and use this information for the three XOR. We don't need anymore the C² last block. C<sub>1</sub> = E<sub>k</sub>(C<sub>0</sub> ⊕ bbbbbbbT) and then P'<sub>0</sub> = C<sub>0</sub> ⊕ C<sub>4</sub> ⊕ bbbbbbbX. He also need to compare C'<sub>0</sub> and C<sub>1</sub>.
 This is another way to do it, you can notice in the PoC i code the two possibilities :)
 
-We can now retrieve all the char ! You can launch the PoC now. I explain also a point **[Attack](#attack)**, i advise you to read it :)
+We can now retrieve all the char !
 
 ### Launch
 
 ```
-	python BEAST-poc.py
+python BEAST-poc.py
 ```
 
 [![asciicast](https://asciinema.org/a/40094.png)](https://asciinema.org/a/40094)
@@ -89,7 +89,7 @@ set as a fixed string such as GET /, POST /, etc. Instead he can use [socket](ht
 He also need to inject some javascript into a malicious page. The victim need to be connected to this page and stay during unitl the attack is done.
 This is a chosen-plaintext attack so the attacker can send through the javascript code every plaintext he wants and intercept the result with a Man in The Middle. This diagram of the attack :
 
-![beast-poc](http://mpgn.fr/ressources/img/beast.png)
+![beast](https://user-images.githubusercontent.com/5891788/52014211-41b1f780-24df-11e9-9af3-c0ae82f8df7e.png)
 
 This attack need a important conditions to be successfull (TLS1.0 or inferior, CBC cipher mode, MiTM, malicious javascript). But Thai Duong and Juliano Rizzo proove it can be possible and the demontrate there exploit by stealing cookie on [Paypal](https://www.youtube.com/watch?v=BTqAIDVUvrU) webiste.
 
